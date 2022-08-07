@@ -1,0 +1,179 @@
+// hfm is the Hugging Face Download Manager.
+//
+// (c) Linus Lee <linus@thesephist.com> 2022
+//     https://github.com/thesephist/hfm
+//
+// Hugging Face Transformers is a great library, but in the course of working
+// with many different models, your .cache/huggingface/transformers can fill up
+// quickly with data. If you don't keep an eye on it (or if you, like me, don't
+// have a lot of disk space), this folder can grow to dozens of GBs and eat up
+// your disk space. hfm helps keep an eye on this download cache folder, and
+// easily remove/inspect cached Hugging Face Transformers downloads.
+
+{
+	println: println
+	default: default
+	map: map
+	each: each
+	take: take
+	merge: merge
+	slice: slice
+	filter: filter
+	append: append
+	reverse: reverse
+	contains?: contains?
+} := import('std')
+{
+	join: join
+	trimStart: trimStart
+	trimEnd: trimEnd
+	padStart: padStart
+	startsWith?: startsWith?
+	endsWith?: endsWith?
+} := import('str')
+fs := import('fs')
+fmt := import('fmt')
+math := import('math')
+sort := import('sort')
+path := import('path')
+json := import('json')
+datetime := import('datetime')
+cli := import('cli')
+debug := import('debug')
+
+Version := '1.0'
+ShortIDLen := 8
+HuggingfaceDir := path.join(env().HOME, '.cache/huggingface/transformers')
+
+fn humanBytes(numBytes) if {
+	kb := 1000
+	mb := 1000000
+	gb := 1000000000
+	tb := 1000000000000
+	numBytes < kb -> string(numBytes) + 'B'
+	numBytes < mb -> string(math.round(numBytes / kb, 2)) + 'KB'
+	numBytes < gb -> string(math.round(numBytes / mb, 2)) + 'MB'
+	numBytes < tb -> string(math.round(numBytes / gb, 2)) + 'GB'
+	_ -> string(math.round(numBytes / tb, 2)) + 'TB'
+}
+
+fn hfCachedFiles(withRecords) with fs.listFiles(HuggingfaceDir) fn(files) {
+	descFiles := files |> filter(fn(f) f.name |> endsWith?('.json'))
+	withRecords(
+		descFiles |> with map() fn(f) {
+			id := f.name |> trimEnd('.json')
+			file := fs.readFile(path.join(HuggingfaceDir, f.name))
+			downloadSize := fs.statFile(path.join(HuggingfaceDir, id + '')).len
+			json.parse(file) |> merge(f, {
+				id: id
+				dir: _
+				name: _
+				downloadSize: downloadSize
+				humanDownloadSize: humanBytes(downloadSize)
+			})
+		}
+	)
+}
+
+fn idPaths(id) [
+	path.join(HuggingfaceDir, id)
+	path.join(HuggingfaceDir, id + '.lock')
+	path.join(HuggingfaceDir, id + '.json')
+]
+
+fn removeRecord(id, opts) {
+	// NOTE: assumes that all 3 files for the record (#, #.lock, #.json) exist
+	idPaths(id) |> with each() fn(pathToRemove) if opts.dry? {
+		true -> fmt.printf('[dry-run] rm "{{ 0 }}"', path.base(pathToRemove))
+		_ -> if rm(pathToRemove).type = :error -> {
+			fmt.printf('[error] Could not remove "{{0}}"', path.base(pathToRemove))
+		}
+	}
+}
+
+fn noDownloadErr(id) {
+	fmt.printf('No download with id "{{ 0 }}".', id)
+	exit(1)
+}
+
+fn moreThanOneDownloadErr(id) {
+	fmt.printf('More than one download matching id "{{ 0 }}".', id)
+	exit(1)
+}
+
+fn printHelp() {
+	println('HFM: Hugging Face Download Manager
+
+Usage
+	hfm ls
+		Show all downloads
+	hfm rm all [--dry-run]
+		Remove all downloads
+	hfm rm <id1> <id2> <id3> [--dry-run]
+		Remove downloads with specific IDs
+	hfm which <id>
+		Print path to download with given ID
+	hfm help
+		Print this message
+
+Options
+	--[h]elp      Show this help message
+	--[v]ersion   Print version information and exit
+	--[d]ry-run   When running "hfm rm", print files that would be deleted, but
+	              don\'t actually delete those files.
+')
+	exit(0)
+}
+
+// Fix cli.parseArgv() for running as a standalone binary
+Cli := with cli.parseArgv() if {
+	args().1 |> default('') |> endsWith?('main.oak') -> args()
+	_ -> ['oak', 'hfm.oak'] |> append(args() |> slice(1))
+}
+
+if Cli.opts.version != ? | Cli.opts.v != ? -> {
+	fmt.printf('hfm v{{0}}', Version)
+	exit(0)
+}
+
+if Cli.opts.help != ? | Cli.opts.h != ? -> printHelp()
+
+if Cli.verb {
+	'rm' -> with hfCachedFiles() fn(records) {
+		// "rm all" is shorthand for remove all downloads
+		if Cli.args.0 = 'all' -> Cli.args := records |> map(:id)
+
+		if idsToRemove := Cli.args {
+			[] -> println('Please provide at least 1 download id to remove.')
+			_ -> idsToRemove |> with each() fn(shortID) {
+				if matches := records |> filter(fn(rec) rec.id |> startsWith?(shortID)) {
+					[] -> noDownloadErr(shortID)
+					[_] -> matches.(0).id |> removeRecord({ dry?: Cli.opts.d != ? | Cli.opts.'dry-run' != ? })
+					_ -> moreThanOneDownloadErr(shortID)
+				}
+			}
+		}
+	}
+	'which' -> with hfCachedFiles() fn(records) if whichID := Cli.args.0 {
+		? -> fmt.printf('Please provide a download id.')
+		_ -> if matches := records |> filter(fn(rec) rec.id |> startsWith?(whichID)) {
+			[] -> noDownloadErr(whichID)
+			[_] -> idPaths(matches.(0).id).0 |> println()
+			_ -> moreThanOneDownloadErr(whichID)
+		}
+	}
+	'help' -> printHelp()
+	'ls', _ -> with hfCachedFiles() fn(records) {
+		maxDownloadBytesLen := math.max(records |> map(fn(r) len(r.humanDownloadSize))...)
+		records |> sort.sort(:downloadSize) |> reverse() |> with each() fn(rec) {
+			fmt.printf('{{ 0 }} {{ 1 }} {{ 2 }} {{ 3 }}'
+				rec.humanDownloadSize |> padStart(maxDownloadBytesLen, ' ')
+				rec.id |> take(ShortIDLen)
+				datetime.format(rec.mod)
+				rec.url |> trimStart('https://huggingface.co/'))
+		}
+		totalBytes := math.sum(records |> map(:downloadSize)...)
+		fmt.printf('{{ 0 }} total', humanBytes(totalBytes) |> padStart(maxDownloadBytesLen, ' '))
+	}
+}
+
