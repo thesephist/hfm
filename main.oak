@@ -7,8 +7,9 @@
 // with many different models, your .cache/huggingface/transformers can fill up
 // quickly with data. If you don't keep an eye on it (or if you, like me, don't
 // have a lot of disk space), this folder can grow to dozens of GBs and eat up
-// your disk space. hfm helps keep an eye on this download cache folder, and
-// easily remove/inspect cached Hugging Face Transformers downloads.
+// your disk space. HFM is a little command-line utility that helps keep an eye
+// on this download cache folder, and easily remove/inspect cached Hugging Face
+// Transformers downloads.
 
 {
 	println: println
@@ -69,7 +70,6 @@ fn hfCachedFiles(withRecords) with fs.listFiles(HuggingfaceDir) fn(files) {
 				dir: _
 				name: _
 				downloadSize: downloadSize
-				humanDownloadSize: humanBytes(downloadSize)
 			})
 		}
 	)
@@ -121,6 +121,9 @@ Options
 	--[v]ersion   Print version information and exit
 	--[d]ry-run   When running "hfm rm", print files that would be deleted, but
 	              don\'t actually delete those files.
+	--no-total    Do not print the total size on filesystem at the end.
+	--no-humanize Do not print file sizes as "MB", "GB", etc. but as integer
+	              numbers of bytes
 ')
 	exit(0)
 }
@@ -137,6 +140,11 @@ if Cli.opts.version != ? | Cli.opts.v != ? -> {
 }
 
 if Cli.opts.help != ? | Cli.opts.h != ? -> printHelp()
+
+bytesSerializer := if Cli.opts.'no-humanize' {
+	? -> humanBytes
+	_ -> string
+}
 
 if Cli.verb {
 	'rm' -> with hfCachedFiles() fn(records) {
@@ -164,16 +172,18 @@ if Cli.verb {
 	}
 	'help' -> printHelp()
 	'ls', _ -> with hfCachedFiles() fn(records) {
-		maxDownloadBytesLen := math.max(records |> map(fn(r) len(r.humanDownloadSize))...)
+		maxDownloadBytesLen := math.max(records |> map(fn(r) len(bytesSerializer(r.downloadSize)))...)
 		records |> sort.sort(:downloadSize) |> reverse() |> with each() fn(rec) {
 			fmt.printf('{{ 0 }} {{ 1 }} {{ 2 }} {{ 3 }}'
-				rec.humanDownloadSize |> padStart(maxDownloadBytesLen, ' ')
+				bytesSerializer(rec.downloadSize) |> padStart(maxDownloadBytesLen, ' ')
 				rec.id |> take(ShortIDLen)
 				datetime.format(rec.mod)
 				rec.url |> trimStart('https://huggingface.co/'))
 		}
-		totalBytes := math.sum(records |> map(:downloadSize)...)
-		fmt.printf('{{ 0 }} total', humanBytes(totalBytes) |> padStart(maxDownloadBytesLen, ' '))
+		if Cli.opts.'no-total' = ? -> {
+			totalBytes := math.sum(records |> map(:downloadSize)...)
+			fmt.printf('{{ 0 }} total', bytesSerializer(totalBytes) |> padStart(maxDownloadBytesLen, ' '))
+		}
 	}
 }
 
